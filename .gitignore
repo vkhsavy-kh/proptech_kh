@@ -7,3 +7,4 @@ node_modules/
 wrangler.jsonc.bak
 .cloudflare-token
 .github-token
+.telegram-creds
