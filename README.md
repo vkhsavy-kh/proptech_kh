@@ -58,7 +58,7 @@ npm run deploy
 Attach your domain to the Worker in Cloudflare, then update `APP_URL` and `TELEGRAM_REDIRECT_URI` in `wrangler.jsonc`.
 
 ## Security before production
-- Replace the SHA-256 password demo with PBKDF2/Argon2-compatible password hashing.
+- ~~Replace the SHA-256 password demo with PBKDF2/Argon2-compatible password hashing.~~ Done: PBKDF2-HMAC-SHA256, 100k iterations, per-password random salt, constant-time comparison, with legacy hashes upgraded on next successful login.
 - Complete Telegram authorization-code exchange and JWKS ID-token signature/claims verification.
 - Add CSRF protections where cookie-authenticated state-changing browser requests are used.
 - Implement R2 presigned uploads and object access policy.

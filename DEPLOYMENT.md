@@ -55,7 +55,7 @@ npm run deploy
 Attach your domain to the Worker in Cloudflare and change `APP_URL` and `TELEGRAM_REDIRECT_URI` in `wrangler.jsonc`.
 
 ## Production hardening
-- Use a dedicated production password hashing scheme (PBKDF2/Argon2 service/library compatible with Workers) instead of the starter SHA-256 password helper.
+- ~~Use a dedicated production password hashing scheme instead of the starter SHA-256 password helper.~~ Done: PBKDF2-HMAC-SHA256 with a per-password random salt. Note the Workers runtime caps `deriveBits` at 100000 iterations (`NotSupportedError` above that), so that is the ceiling until the platform raises it.
 - Add rate limiting to authentication and bootstrap routes.
 - Add CSRF protection for cookie-authenticated browser mutations.
 - Add password reset and optional phone verification.
