@@ -5,7 +5,7 @@ import { setCookie, getCookie } from 'hono/cookie';
 
 interface Env {
   DB: D1Database;
-  MEDIA: R2Bucket;
+  MEDIA?: R2Bucket;
   SESSIONS: KVNamespace;
   NOTIFICATIONS: Queue;
   APP_NAME: string;
@@ -69,9 +69,9 @@ app.post('/api/setup/bootstrap-admin', async c => { const key=c.req.header('x-bo
 
 app.post('/api/properties/:id/status', requireAuth, async c => { const u=c.get('user'); const body=await c.req.json(); const target=body.status; const allowed=['draft','pending_review','approved','published','under_offer','sold','rented','archived']; if(!allowed.includes(target)) return c.json({error:'Invalid status'},400); const perm=target==='published'?'property.publish':target==='approved'?'property.approve':'property.edit'; if(!(await requirePermission(c,perm))) return c.json({error:'Forbidden'},403); await c.env.DB.prepare('UPDATE properties SET status=?,published_at=CASE WHEN ?="published" THEN CURRENT_TIMESTAMP ELSE published_at END,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(target,target,c.req.param('id')).run(); await c.env.DB.prepare('INSERT INTO audit_logs(actor_id,action,entity_type,entity_id,metadata) VALUES(?,?,?,?,?)').bind(u.id,'status_change','property',c.req.param('id'),JSON.stringify({status:target})).run(); return c.json({ok:true}); });
 
-app.post('/api/properties/:id/images', requireAuth, async c => { if(!(await requirePermission(c,'property.edit'))) return c.json({error:'Forbidden'},403); const form=await c.req.formData(); const file=form.get('file'); if(!(file instanceof File)) return c.json({error:'file is required'},400); if(file.size>15*1024*1024) return c.json({error:'Max 15MB'},413); if(!file.type.startsWith('image/')) return c.json({error:'Image only'},415); const key=`properties/${c.req.param('id')}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`; await c.env.MEDIA.put(key,file.stream(),{httpMetadata:{contentType:file.type}}); const r=await c.env.DB.prepare('INSERT INTO property_images(property_id,object_key,caption) VALUES(?,?,?)').bind(c.req.param('id'),key,String(form.get('caption')||'')).run(); return c.json({ok:true,id:r.meta.last_row_id,key}); });
+app.post('/api/properties/:id/images', requireAuth, async c => { if(!(await requirePermission(c,'property.edit'))) return c.json({error:'Forbidden'},403); if(!c.env.MEDIA) return c.json({error:'Media storage is not enabled on this deployment'},501); const form=await c.req.formData(); const file=form.get('file'); if(!(file instanceof File)) return c.json({error:'file is required'},400); if(file.size>15*1024*1024) return c.json({error:'Max 15MB'},413); if(!file.type.startsWith('image/')) return c.json({error:'Image only'},415); const key=`properties/${c.req.param('id')}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`; await c.env.MEDIA.put(key,file.stream(),{httpMetadata:{contentType:file.type}}); const r=await c.env.DB.prepare('INSERT INTO property_images(property_id,object_key,caption) VALUES(?,?,?)').bind(c.req.param('id'),key,String(form.get('caption')||'')).run(); return c.json({ok:true,id:r.meta.last_row_id,key}); });
 
-app.get('/media/*', async c => { const key=c.req.path.replace('/media/',''); const obj=await c.env.MEDIA.get(key); if(!obj) return c.notFound(); return new Response(obj.body,{headers:{'Content-Type':obj.httpMetadata?.contentType||'application/octet-stream','Cache-Control':'public, max-age=31536000, immutable'}}); });
+app.get('/media/*', async c => { if(!c.env.MEDIA) return c.json({error:'Media storage is not enabled on this deployment'},501); const key=c.req.path.replace('/media/',''); const obj=await c.env.MEDIA.get(key); if(!obj) return c.notFound(); return new Response(obj.body,{headers:{'Content-Type':obj.httpMetadata?.contentType||'application/octet-stream','Cache-Control':'public, max-age=31536000, immutable'}}); });
 
 app.get('/api/health', c=>c.json({ok:true,app:'PropTech',time:new Date().toISOString()}));
 

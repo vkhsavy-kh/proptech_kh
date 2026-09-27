@@ -7,27 +7,21 @@
   "workers_dev": true,
   "vars": {
     "APP_NAME": "PropTech",
-    "APP_URL": "https://YOUR-DOMAIN.com",
-    "TELEGRAM_REDIRECT_URI": "https://YOUR-DOMAIN.com/auth/telegram/callback"
+    "APP_URL": "https://proptech.genzkh855.workers.dev",
+    "TELEGRAM_REDIRECT_URI": "https://proptech.genzkh855.workers.dev/auth/telegram/callback"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "proptech-db",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "96bc5b79-bcaf-4cba-b3b4-655d31378b76",
       "migrations_dir": "migrations"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "MEDIA",
-      "bucket_name": "proptech-media"
     }
   ],
   "kv_namespaces": [
     {
       "binding": "SESSIONS",
-      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+      "id": "d8b9e38dd3bc4d30afbc8e1a9959b8d3"
     }
   ],
   "queues": {
