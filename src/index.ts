@@ -22,7 +22,58 @@ app.use('*', cors());
 
 const page = (title:string, body:any) => html`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} — PropTech</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-50 text-slate-900"><nav class="bg-white border-b"><div class="max-w-7xl mx-auto px-6 py-4 flex justify-between"><a href="/" class="font-bold text-2xl">Prop<span class="text-emerald-600">Tech</span></a><div class="space-x-5"><a href="/properties">Properties</a><a href="/login">Login</a></div></div></nav>${body}</body></html>`;
 
-async function hashPassword(password:string){ const data=new TextEncoder().encode(password); const hash=await crypto.subtle.digest('SHA-256',data); return [...new Uint8Array(hash)].map(x=>x.toString(16).padStart(2,'0')).join(''); }
+// --- password hashing -------------------------------------------------------
+// PBKDF2-HMAC-SHA256 with a per-password random salt. Stored format:
+//   pbkdf2_sha256$<iterations>$<salt-b64>$<hash-b64>
+// The iteration count lives in the stored value so it can be raised later
+// and existing hashes upgraded on the next successful login.
+//
+// 100k is the hard ceiling: the Workers runtime rejects deriveBits above it
+// with "iteration counts above 100000 are not supported" (NotSupportedError).
+// Node's Web Crypto has no such cap, so verify against workerd, not node, when
+// changing this value.
+const PBKDF2_ITERATIONS = 100_000;
+const PBKDF2_SCHEME = 'pbkdf2_sha256';
+
+const b64 = (bytes:Uint8Array) => { let s=''; for(const b of bytes) s+=String.fromCharCode(b); return btoa(s); };
+const unb64 = (s:string) => { const bin=atob(s); const out=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i); return out; };
+
+async function pbkdf2(password:string, salt:Uint8Array, iterations:number){
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name:'PBKDF2', salt: salt as unknown as BufferSource, iterations, hash:'SHA-256' }, key, 256);
+  return new Uint8Array(bits);
+}
+
+// Constant-time compare: avoids leaking the match position via timing.
+function safeEqual(a:Uint8Array, b:Uint8Array){
+  if(a.length !== b.length) return false;
+  let diff = 0;
+  for(let i=0;i<a.length;i++) diff |= a[i]^b[i];
+  return diff === 0;
+}
+
+async function hashPassword(password:string){
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await pbkdf2(password, salt, PBKDF2_ITERATIONS);
+  return `${PBKDF2_SCHEME}$${PBKDF2_ITERATIONS}$${b64(salt)}$${b64(hash)}`;
+}
+
+// Verifies against either the new PBKDF2 scheme or the original unsalted
+// SHA-256 helper. Legacy hashes still validate but are flagged for rehashing.
+async function verifyPassword(password:string, stored:string){
+  if(/^[0-9a-f]{64}$/i.test(stored)){
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(password)));
+    let hex=''; for(const b of digest) hex += b.toString(16).padStart(2,'0');
+    const ok = safeEqual(new TextEncoder().encode(hex), new TextEncoder().encode(stored.toLowerCase()));
+    return { ok, needsRehash: ok };
+  }
+  const parts = stored.split('$');
+  if(parts.length !== 4 || parts[0] !== PBKDF2_SCHEME) return { ok:false, needsRehash:false };
+  const iterations = Number(parts[1]);
+  if(!Number.isFinite(iterations) || iterations < 1) return { ok:false, needsRehash:false };
+  const actual = await pbkdf2(password, unb64(parts[2]), iterations);
+  return { ok: safeEqual(actual, unb64(parts[3])), needsRehash: iterations < PBKDF2_ITERATIONS };
+}
 async function sessionUser(c:any){ const sid=getCookie(c,'proptech_session'); if(!sid) return null; const raw=await c.env.SESSIONS.get(`session:${sid}`); if(!raw) return null; return JSON.parse(raw); }
 async function requireAuth(c:any,next:any){ const u=await sessionUser(c); if(!u) return c.json({error:'Unauthorized'},401); c.set('user',u); await next(); }
 async function requirePermission(c:any, code:string){ const u=c.get('user'); if(!u) return false; const row=await c.env.DB.prepare('SELECT 1 FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND p.code=?').bind(u.role_id,code).first(); return !!row; }
@@ -39,7 +90,17 @@ app.get('/dashboard', async c => { const u=await sessionUser(c); if(!u) return c
 
 app.get('/admin/properties/new', async c => { const u=await sessionUser(c); if(!u) return c.redirect('/login'); return c.html(page('Add Property', html`<main class="max-w-4xl mx-auto px-6 py-10"><h1 class="text-4xl font-bold">Add Property</h1><p class="text-slate-500 mt-2">Five-step agency listing workflow.</p><form id="f" class="bg-white border rounded-3xl p-8 mt-8 space-y-5"><div class="grid md:grid-cols-2 gap-4"><input name="title" class="p-3 border rounded-xl" placeholder="Property title" required><select name="listing_type" class="p-3 border rounded-xl"><option value="sale">For Sale</option><option value="rent">For Rent</option><option value="sale_rent">Sale + Rent</option></select><select name="property_type" class="p-3 border rounded-xl"><option>Villa</option><option>Condo</option><option>House</option><option>Land</option><option>Shophouse</option><option>Apartment</option><option>Commercial</option></select><input name="sale_price" type="number" class="p-3 border rounded-xl" placeholder="Sale price USD"><input name="rent_price" type="number" class="p-3 border rounded-xl" placeholder="Rent/month USD"><input name="bedrooms" type="number" class="p-3 border rounded-xl" placeholder="Bedrooms"><input name="bathrooms" type="number" class="p-3 border rounded-xl" placeholder="Bathrooms"><input name="land_area" type="number" class="p-3 border rounded-xl" placeholder="Land area m²"><input name="building_area" type="number" class="p-3 border rounded-xl" placeholder="Building area m²"><input name="province" class="p-3 border rounded-xl" placeholder="Province"><input name="district" class="p-3 border rounded-xl" placeholder="Khan / District"><input name="sangkat" class="p-3 border rounded-xl" placeholder="Sangkat / Commune"><input name="village" class="p-3 border rounded-xl" placeholder="Village"><input name="street" class="p-3 border rounded-xl" placeholder="Street / Road"><input name="landmark" class="p-3 border rounded-xl" placeholder="Nearby landmark"><input name="latitude" type="number" step="any" class="p-3 border rounded-xl" placeholder="Latitude"><input name="longitude" type="number" step="any" class="p-3 border rounded-xl" placeholder="Longitude"></div><textarea name="description" class="w-full p-3 border rounded-xl" rows="6" placeholder="Description"></textarea><div class="border-2 border-dashed rounded-2xl p-8 text-center"><input id="photos" type="file" multiple accept="image/*"><p class="text-sm text-slate-500 mt-2">Photos are uploaded to Cloudflare R2 after the property is created.</p></div><button class="bg-emerald-600 text-white px-7 py-3 rounded-xl">Save Draft</button><p id="msg"></p></form></main><script>document.getElementById('f').onsubmit=async e=>{e.preventDefault();let data=Object.fromEntries(new FormData(e.target));for(let k of ['sale_price','rent_price','bedrooms','bathrooms','land_area','building_area','latitude','longitude'])if(data[k]==='')delete data[k];let r=await fetch('/api/properties',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});let j=await r.json();document.getElementById('msg').textContent=r.ok?'Saved property #'+j.id:(j.error||'Error');}</script>`)); });
 
-app.post('/api/auth/login', async c => { let body:any; try { body=await c.req.json(); } catch { return c.json({error:'Invalid request body'},400); } const login=typeof body?.login==='string'?body.login.trim():''; const password=typeof body?.password==='string'?body.password:''; if(!login||!password) return c.json({error:'Invalid login'},401); const hash=await hashPassword(password); const u=await c.env.DB.prepare('SELECT u.*,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE (u.email=? OR u.phone=?) AND u.password_hash=? AND u.status="active"').bind(login,login,hash).first(); if(!u) return c.json({error:'Invalid login'},401); const sid=crypto.randomUUID(); await c.env.SESSIONS.put(`session:${sid}`,JSON.stringify(u),{expirationTtl:604800}); setCookie(c,'proptech_session',sid,{httpOnly:true,secure:true,sameSite:'Lax',path:'/',maxAge:604800}); return c.json({ok:true}); });
+app.post('/api/auth/login', async c => { let body:any; try { body=await c.req.json(); } catch { return c.json({error:'Invalid request body'},400); } const login=typeof body?.login==='string'?body.login.trim():''; const password=typeof body?.password==='string'?body.password:''; if(!login||!password) return c.json({error:'Invalid login'},401); const u:any=await c.env.DB.prepare('SELECT u.*,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE (u.email=? OR u.phone=?) AND u.status="active"').bind(login,login).first(); if(!u){ // verify against a throwaway hash so a missing account costs the same as a wrong password and cannot be distinguished by timing
+    await pbkdf2(password, crypto.getRandomValues(new Uint8Array(16)), PBKDF2_ITERATIONS); return c.json({error:'Invalid login'},401); }
+  if(!u.password_hash){ await pbkdf2(password, crypto.getRandomValues(new Uint8Array(16)), PBKDF2_ITERATIONS); return c.json({error:'Invalid login'},401); }
+  const check = await verifyPassword(password, u.password_hash);
+  if(!check.ok) return c.json({error:'Invalid login'},401);
+  if(check.needsRehash){ // transparently upgrade legacy/undersized hashes on successful login
+    const upgraded = await hashPassword(password);
+    await c.env.DB.prepare('UPDATE users SET password_hash=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(upgraded, u.id).run();
+    u.password_hash = upgraded;
+  }
+  const sid=crypto.randomUUID(); await c.env.SESSIONS.put(`session:${sid}`,JSON.stringify(u),{expirationTtl:604800}); setCookie(c,'proptech_session',sid,{httpOnly:true,secure:true,sameSite:'Lax',path:'/',maxAge:604800}); return c.json({ok:true}); });
 
 function b64url(bytes:ArrayBuffer|Uint8Array){ const a=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes); let s=''; for(const b of a)s+=String.fromCharCode(b); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
 
