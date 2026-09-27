@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "proptech",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "APP_NAME": "PropTech",
+    "APP_URL": "https://YOUR-DOMAIN.com",
+    "TELEGRAM_REDIRECT_URI": "https://YOUR-DOMAIN.com/auth/telegram/callback"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "proptech-db",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "proptech-media"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SESSIONS",
+      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "NOTIFICATIONS", "queue": "proptech-notifications" }
+    ]
+  }
+}
