@@ -13,6 +13,17 @@
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
+# Accept credentials without them ever being typed into a chat/terminal prompt.
+# Put the token in .cloudflare-token (one line, no quotes) and re-run.
+$tokenFile = Join-Path $PSScriptRoot '.cloudflare-token'
+if ((Test-Path $tokenFile) -and -not $env:CLOUDFLARE_API_TOKEN) {
+  $tok = (Get-Content $tokenFile -Raw).Trim()
+  if ($tok) {
+    $env:CLOUDFLARE_API_TOKEN = $tok
+    Write-Host "[creds] Loaded API token from .cloudflare-token" -ForegroundColor DarkGray
+  }
+}
+
 function Step($n) { Write-Host "`n[$n]" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "  OK   $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  WARN $m" -ForegroundColor Yellow }

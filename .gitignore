@@ -2,3 +2,8 @@ node_modules/
 .wrangler/
 .dev.vars
 .env
+
+# local deploy artifacts and credentials - never commit
+wrangler.jsonc.bak
+.cloudflare-token
+.github-token
