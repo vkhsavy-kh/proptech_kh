@@ -74,8 +74,25 @@ async function verifyPassword(password:string, stored:string){
   const actual = await pbkdf2(password, unb64(parts[2]), iterations);
   return { ok: safeEqual(actual, unb64(parts[3])), needsRehash: iterations < PBKDF2_ITERATIONS };
 }
-async function sessionUser(c:any){ const sid=getCookie(c,'proptech_session'); if(!sid) return null; const raw=await c.env.SESSIONS.get(`session:${sid}`); if(!raw) return null; return JSON.parse(raw); }
+async function sessionUser(c:any){ const sid=getCookie(c,'proptech_session'); if(!sid) return null; const raw=await c.env.SESSIONS.get(`session:${sid}`); if(!raw) return null; const u=JSON.parse(raw); if(!u?.id) return null; // a session minted before a password change carries a stale epoch
+  const row:any=await c.env.DB.prepare('SELECT session_epoch FROM users WHERE id=? AND status=?').bind(u.id,'active').first();
+  if(!row) return null;
+  if(Number(u.epoch||0) !== Number(row.session_epoch||0)){ await c.env.SESSIONS.delete(`session:${sid}`); return null; }
+  return u;
+}
 async function requireAuth(c:any,next:any){ const u=await sessionUser(c); if(!u) return c.json({error:'Unauthorized'},401); c.set('user',u); await next(); }
+
+// Mints a session stamped with the user's current session_epoch. Reading the
+// value from the database (rather than the caller's copy of the user row)
+// keeps a session valid across a password change for the acting browser only.
+async function issueSession(c:any, u:any){
+  const row:any = await c.env.DB.prepare('SELECT session_epoch FROM users WHERE id=?').bind(u.id).first();
+  const payload = { ...u, epoch: Number(row?.session_epoch || 0) };
+  const sid = crypto.randomUUID();
+  await c.env.SESSIONS.put(`session:${sid}`, JSON.stringify(payload), { expirationTtl: 604800 });
+  setCookie(c,'proptech_session',sid,{httpOnly:true,secure:true,sameSite:'Lax',path:'/',maxAge:604800});
+  return sid;
+}
 async function requirePermission(c:any, code:string){ const u=c.get('user'); if(!u) return false; const row=await c.env.DB.prepare('SELECT 1 FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND p.code=?').bind(u.role_id,code).first(); return !!row; }
 
 app.get('/', c => c.html(page('Home', html`<main class="max-w-7xl mx-auto px-6 py-16"><div class="rounded-3xl bg-slate-900 text-white p-10 md:p-16"><p class="text-emerald-300 font-semibold">CAMBODIA REAL ESTATE PLATFORM</p><h1 class="text-5xl font-bold mt-3">Find your next property with PropTech.</h1><p class="text-slate-300 mt-5 max-w-2xl">Buy, rent and manage property listings with a professional agency CRM built for Cambodia.</p><a href="/properties" class="inline-block mt-8 bg-emerald-500 px-6 py-3 rounded-xl font-semibold">Explore Properties</a></div><section class="mt-12"><h2 class="text-2xl font-bold">Featured Properties</h2><div id="featured" class="grid md:grid-cols-3 gap-5 mt-5"></div></section></main><script>fetch('/api/properties?limit=6').then(r=>r.json()).then(d=>{document.getElementById('featured').innerHTML=d.data.map(p=>\`<a href="/properties/\${p.id}" class="bg-white rounded-2xl overflow-hidden border"><div class="h-44 bg-slate-200"></div><div class="p-5"><div class="font-bold">\${p.title}</div><div class="text-sm text-slate-500 mt-2">\${p.property_type} · \${p.province||''}</div><div class="font-semibold mt-3">\${p.sale_price? '$'+Number(p.sale_price).toLocaleString():p.rent_price? '$'+Number(p.rent_price).toLocaleString()+'/mo':'Contact for price'}</div></div></a>\`).join('')})</script>`)));
@@ -273,7 +290,87 @@ app.post('/api/auth/login', async c => { let body:any; try { body=await c.req.js
     await c.env.DB.prepare('UPDATE users SET password_hash=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(upgraded, u.id).run();
     u.password_hash = upgraded;
   }
-  const sid=crypto.randomUUID(); await c.env.SESSIONS.put(`session:${sid}`,JSON.stringify(u),{expirationTtl:604800}); setCookie(c,'proptech_session',sid,{httpOnly:true,secure:true,sameSite:'Lax',path:'/',maxAge:604800}); return c.json({ok:true}); });
+  await issueSession(c,u);
+  return c.json({ok:true}); });
+
+// Password strength is deliberately modest but explicit. The 12-character
+// floor matches the bootstrap rule, and rejecting a reuse of the current
+// password stops a "change" that silently leaves the old secret in place.
+const PASSWORD_MIN = 12;
+function passwordProblem(next:string, current:string){
+  if(typeof next!=='string' || !next) return 'Enter a new password';
+  if(next.length < PASSWORD_MIN) return `New password must be at least ${PASSWORD_MIN} characters`;
+  if(next.length > 200) return 'New password is too long';
+  if(typeof current==='string' && current && next===current) return 'New password must be different from your current one';
+  return null;
+}
+
+app.post('/api/auth/password', requireAuth, async c => {
+  const u = c.get('user');
+  let body:any; try { body = await c.req.json(); } catch { return c.json({error:'Invalid request body'},400); }
+  const current = typeof body?.current === 'string' ? body.current : '';
+  const next = typeof body?.next === 'string' ? body.next : '';
+  const problem = passwordProblem(next, current);
+  if(problem) return c.json({ error: problem }, 400);
+  if(!current) return c.json({ error: 'Enter your current password' }, 400);
+
+  // Always read the stored hash from the database. The value cached in the
+  // session payload can be a legacy SHA-256 digest that an earlier login
+  // already upgraded, so trusting it could reject the correct password.
+  const row:any = await c.env.DB.prepare('SELECT id, password_hash, role_id, name, email, phone, session_epoch FROM users WHERE id=? AND status=?').bind(u.id,'active').first();
+  if(!row) return c.json({ error: 'Account not found' }, 404 );
+  if(!row.password_hash){
+    // No password set (for example a Telegram-only account): require the
+    // bootstrap flow rather than letting anyone claim the account.
+    return c.json({ error: 'This account has no password set. Use the Telegram login or contact an administrator.' }, 400 );
+  }
+  const check = await verifyPassword(current, row.password_hash);
+  if(!check.ok) return c.json({ error: 'Current password is incorrect' }, 403 );
+
+  const updated = await hashPassword(next);
+  // Bumping the epoch retires every session issued under the old password,
+  // including any an attacker may hold.
+  await c.env.DB.prepare('UPDATE users SET password_hash=?, session_epoch=session_epoch+1, updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(updated, u.id).run();
+  await c.env.DB.prepare('INSERT INTO audit_logs(actor_id,action,entity_type,entity_id,metadata) VALUES(?,?,?,?,?)').bind(u.id,'password_change','user',u.id,JSON.stringify({ invalidated_sessions: true })).run();
+  // Reissue for this browser so the person who just changed it stays signed in.
+  await issueSession(c, { ...row, epoch: Number(row.session_epoch||0) + 1 });
+  return c.json({ ok: true, message: 'Password updated. Other devices have been signed out.' });
+});
+
+app.get('/account/password', async c => { const u=await sessionUser(c); if(!u) return c.redirect('/login'); return c.html(page('Change password', html`
+<main class="max-w-lg mx-auto px-6 py-14">
+  <a href="/dashboard" class="text-sm text-slate-500 hover:text-slate-900">&larr; Back to dashboard</a>
+  <div class="bg-white border rounded-3xl p-8 mt-4">
+    <h1 class="text-2xl font-bold">Change password</h1>
+    <p class="text-slate-500 text-sm mt-1.5">Changing your password signs out every other device.</p>
+    <form id="form" class="space-y-4 mt-7">
+      <div><label class="block text-sm font-medium mb-1.5">Current password</label><input name="current" type="password" autocomplete="current-password" class="w-full p-3 border rounded-xl" required></div>
+      <div><label class="block text-sm font-medium mb-1.5">New password</label><input name="next" type="password" autocomplete="new-password" minlength="12" class="w-full p-3 border rounded-xl" required><p class="text-xs text-slate-400 mt-1.5">At least 12 characters. Avoid passwords you use elsewhere.</p></div>
+      <div><label class="block text-sm font-medium mb-1.5">Confirm new password</label><input name="confirm" type="password" autocomplete="new-password" minlength="12" class="w-full p-3 border rounded-xl" required></div>
+      <div id="strength" class="h-1.5 rounded-full bg-slate-100 overflow-hidden"><div id="bar" class="h-full w-0 bg-rose-400 transition-all"></div></div>
+      <button class="w-full bg-slate-900 text-white p-3 rounded-xl disabled:opacity-50" id="submit">Update password</button>
+      <p id="msg" class="text-sm"></p>
+    </form>
+  </div>
+</main>
+<script>
+const form=document.getElementById('form'), msg=document.getElementById('msg'), btn=document.getElementById('submit');
+const bar=document.getElementById('bar'), nextEl=form.next, confirmEl=form.confirm;
+// Cheap client-side length feedback only. The server owns the real check.
+function score(){ const v=nextEl.value; let s=0; if(v.length>=12)s+=40; if(v.length>=16)s+=20; if(/[a-z]/.test(v)&&/[A-Z]/.test(v))s+=15; if(/[0-9]/.test(v))s+=15; if(/[^A-Za-z0-9]/.test(v))s+=10;
+  bar.style.width=Math.min(100,s)+'%'; bar.className='h-full transition-all '+(s<40?'bg-rose-400':s<75?'bg-amber-400':'bg-emerald-500');
+  btn.disabled = confirmEl.value!==v || v.length<12; }
+nextEl.addEventListener('input',score); confirmEl.addEventListener('input',score);
+form.onsubmit=async e=>{ e.preventDefault(); msg.textContent=''; msg.className='text-sm';
+  if(nextEl.value!==confirmEl.value){ msg.textContent='The two new passwords do not match'; msg.className='text-sm text-red-600'; return; }
+  btn.disabled=true;
+  let r; try { r=await fetch('/api/auth/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current:form.current.value,next:nextEl.value})}); }
+  catch { msg.textContent='Network error, try again'; msg.className='text-sm text-red-600'; btn.disabled=false; return; }
+  const j=await r.json().catch(()=>({error:'Unexpected response'}));
+  if(r.ok){ form.reset(); bar.style.width='0'; msg.textContent=j.message||'Password updated'; msg.className='text-sm text-emerald-700'; }
+  else { msg.textContent=j.error||'Could not update password'; msg.className='text-sm text-red-600'; }
+  btn.disabled=false; };
+</script>`)); });
 
 function b64url(bytes:ArrayBuffer|Uint8Array){ const a=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes); let s=''; for(const b of a)s+=String.fromCharCode(b); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
 
@@ -290,7 +387,7 @@ async function verifyTelegramJwt(token:string, clientId:string){
   if(!(await crypto.subtle.verify('RSASSA-PKCS1-v1_5',key,sig,data))) throw new Error('Invalid signature'); return payload;
 }
 app.get('/auth/telegram', async c => { const id=c.env.TELEGRAM_CLIENT_ID; if(!id||!c.env.TELEGRAM_CLIENT_SECRET) return c.html(notice('Telegram login is not available','Telegram sign-in has not been configured on this deployment yet. Use your email and password to sign in.'),503); if(!c.env.TELEGRAM_REDIRECT_URI||c.env.TELEGRAM_REDIRECT_URI.includes('YOUR-DOMAIN')) return c.html(notice('Telegram login is misconfigured','The Telegram redirect URI has not been set for this deployment. Use your email and password to sign in.'),503); const state=crypto.randomUUID(); const verifier=b64url(crypto.getRandomValues(new Uint8Array(32))); const challenge=b64url(await sha256Text(verifier)); await c.env.SESSIONS.put(`oauth:${state}`,verifier,{expirationTtl:600}); const url=new URL('https://oauth.telegram.org/auth'); url.searchParams.set('client_id',id); url.searchParams.set('redirect_uri',c.env.TELEGRAM_REDIRECT_URI); url.searchParams.set('response_type','code'); url.searchParams.set('scope','openid profile phone'); url.searchParams.set('state',state); url.searchParams.set('code_challenge',challenge); url.searchParams.set('code_challenge_method','S256'); return c.redirect(url.toString()); });
-app.get('/auth/telegram/callback', async c => { try { const code=c.req.query('code'),state=c.req.query('state'); if(!code||!state) return c.html(notice('Sign-in failed','Telegram did not return an authorization code. Please try again.'),400); const verifier=await c.env.SESSIONS.get(`oauth:${state}`); await c.env.SESSIONS.delete(`oauth:${state}`); if(!verifier) return c.html(notice('Sign-in expired','This sign-in link was already used or took too long. Please try again.'),400); const basic=btoa(`${c.env.TELEGRAM_CLIENT_ID}:${c.env.TELEGRAM_CLIENT_SECRET}`); const form=new URLSearchParams({grant_type:'authorization_code',code,redirect_uri:c.env.TELEGRAM_REDIRECT_URI,client_id:c.env.TELEGRAM_CLIENT_ID!,code_verifier:verifier}); const tr=await fetch('https://oauth.telegram.org/token',{method:'POST',headers:{Authorization:`Basic ${basic}`,'Content-Type':'application/x-www-form-urlencoded'},body:form}); const tj:any=await tr.json(); if(!tr.ok||!tj.id_token) return c.html(notice('Telegram sign-in failed','Telegram rejected the sign-in request. Please try again.'),401); const claims:any=await verifyTelegramJwt(tj.id_token,c.env.TELEGRAM_CLIENT_ID!); const role:any=await c.env.DB.prepare('SELECT id FROM roles WHERE name=?').bind('customer').first(); if(!role) return c.html(notice('Sign-in unavailable','The customer role is missing from the database. Run the migrations again.'),500); const existing:any=await c.env.DB.prepare('SELECT u.*,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE u.telegram_id=?').bind(String(claims.sub)).first(); let u:any=existing; if(!u){ if(!c.env.DB) return c.html(notice('Sign-in unavailable','Database binding is missing.'),500); const ins=await c.env.DB.prepare('INSERT INTO users(name,phone,telegram_id,telegram_username,role_id) VALUES(?,?,?,?,?)').bind(claims.name||claims.preferred_username||'Telegram User',claims.phone_number||null,String(claims.sub),claims.preferred_username||null,(role as any).id).run(); u=await c.env.DB.prepare('SELECT u.*,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=?').bind(ins.meta.last_row_id).first(); } const sid=crypto.randomUUID(); await c.env.SESSIONS.put(`session:${sid}`,JSON.stringify(u),{expirationTtl:604800}); setCookie(c,'proptech_session',sid,{httpOnly:true,secure:true,sameSite:'Lax',path:'/',maxAge:604800}); return c.redirect('/dashboard'); } catch(e){ console.error('telegram callback error', e); return c.html(notice('Sign-in failed','We could not complete Telegram sign-in. Please try again or use your email and password.'),401); } });
+app.get('/auth/telegram/callback', async c => { try { const code=c.req.query('code'),state=c.req.query('state'); if(!code||!state) return c.html(notice('Sign-in failed','Telegram did not return an authorization code. Please try again.'),400); const verifier=await c.env.SESSIONS.get(`oauth:${state}`); await c.env.SESSIONS.delete(`oauth:${state}`); if(!verifier) return c.html(notice('Sign-in expired','This sign-in link was already used or took too long. Please try again.'),400); const basic=btoa(`${c.env.TELEGRAM_CLIENT_ID}:${c.env.TELEGRAM_CLIENT_SECRET}`); const form=new URLSearchParams({grant_type:'authorization_code',code,redirect_uri:c.env.TELEGRAM_REDIRECT_URI,client_id:c.env.TELEGRAM_CLIENT_ID!,code_verifier:verifier}); const tr=await fetch('https://oauth.telegram.org/token',{method:'POST',headers:{Authorization:`Basic ${basic}`,'Content-Type':'application/x-www-form-urlencoded'},body:form}); const tj:any=await tr.json(); if(!tr.ok||!tj.id_token) return c.html(notice('Telegram sign-in failed','Telegram rejected the sign-in request. Please try again.'),401); const claims:any=await verifyTelegramJwt(tj.id_token,c.env.TELEGRAM_CLIENT_ID!); const role:any=await c.env.DB.prepare('SELECT id FROM roles WHERE name=?').bind('customer').first(); if(!role) return c.html(notice('Sign-in unavailable','The customer role is missing from the database. Run the migrations again.'),500); const existing:any=await c.env.DB.prepare('SELECT u.*,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE u.telegram_id=?').bind(String(claims.sub)).first(); let u:any=existing; if(!u){ if(!c.env.DB) return c.html(notice('Sign-in unavailable','Database binding is missing.'),500); const ins=await c.env.DB.prepare('INSERT INTO users(name,phone,telegram_id,telegram_username,role_id) VALUES(?,?,?,?,?)').bind(claims.name||claims.preferred_username||'Telegram User',claims.phone_number||null,String(claims.sub),claims.preferred_username||null,(role as any).id).run(); u=await c.env.DB.prepare('SELECT u.*,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=?').bind(ins.meta.last_row_id).first(); } await issueSession(c,u); return c.redirect('/dashboard'); } catch(e){ console.error('telegram callback error', e); return c.html(notice('Sign-in failed','We could not complete Telegram sign-in. Please try again or use your email and password.'),401); } });
 
 // Builds the shared WHERE clause used by both the search endpoint and the
 // facet endpoint, so the counts in the filter rail can never disagree with
