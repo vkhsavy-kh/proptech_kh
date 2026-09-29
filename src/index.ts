@@ -80,7 +80,180 @@ async function requirePermission(c:any, code:string){ const u=c.get('user'); if(
 
 app.get('/', c => c.html(page('Home', html`<main class="max-w-7xl mx-auto px-6 py-16"><div class="rounded-3xl bg-slate-900 text-white p-10 md:p-16"><p class="text-emerald-300 font-semibold">CAMBODIA REAL ESTATE PLATFORM</p><h1 class="text-5xl font-bold mt-3">Find your next property with PropTech.</h1><p class="text-slate-300 mt-5 max-w-2xl">Buy, rent and manage property listings with a professional agency CRM built for Cambodia.</p><a href="/properties" class="inline-block mt-8 bg-emerald-500 px-6 py-3 rounded-xl font-semibold">Explore Properties</a></div><section class="mt-12"><h2 class="text-2xl font-bold">Featured Properties</h2><div id="featured" class="grid md:grid-cols-3 gap-5 mt-5"></div></section></main><script>fetch('/api/properties?limit=6').then(r=>r.json()).then(d=>{document.getElementById('featured').innerHTML=d.data.map(p=>\`<a href="/properties/\${p.id}" class="bg-white rounded-2xl overflow-hidden border"><div class="h-44 bg-slate-200"></div><div class="p-5"><div class="font-bold">\${p.title}</div><div class="text-sm text-slate-500 mt-2">\${p.property_type} · \${p.province||''}</div><div class="font-semibold mt-3">\${p.sale_price? '$'+Number(p.sale_price).toLocaleString():p.rent_price? '$'+Number(p.rent_price).toLocaleString()+'/mo':'Contact for price'}</div></div></a>\`).join('')})</script>`)));
 
-app.get('/properties', c => c.html(page('Properties', html`<main class="max-w-7xl mx-auto px-6 py-10"><div class="flex flex-col md:flex-row gap-4 mb-6"><input id="q" class="flex-1 p-3 rounded-xl border" placeholder="Search property, location..."><select id="type" class="p-3 rounded-xl border"><option value="">All types</option><option>Villa</option><option>Condo</option><option>Land</option><option>Shophouse</option><option>House</option></select><button onclick="load()" class="bg-slate-900 text-white px-6 rounded-xl">Search</button></div><div id="list" class="grid md:grid-cols-3 gap-5"></div></main><script>async function load(){let u='/api/properties?status=published&limit=30&q='+encodeURIComponent(document.getElementById('q').value)+'&property_type='+encodeURIComponent(document.getElementById('type').value);let d=await fetch(u).then(r=>r.json());document.getElementById('list').innerHTML=d.data.map(p=>\`<a href="/properties/\${p.id}" class="bg-white rounded-2xl border p-5"><div class="h-40 bg-slate-100 rounded-xl"></div><h3 class="font-bold mt-4">\${p.title}</h3><p class="text-sm text-slate-500">\${p.property_type} · \${p.district||p.province||''}</p><p class="font-bold mt-3">\${p.sale_price?'$'+Number(p.sale_price).toLocaleString():p.rent_price?'$'+Number(p.rent_price).toLocaleString()+'/mo':'Contact'}</p></a>\`).join('')}load()</script>`)));
+// Search state lives entirely in the query string so any result set can be
+// linked, bookmarked or shared, and the back button behaves as expected.
+const clientScript = (mediaOn:boolean) => html`
+<script>
+const MEDIA = '${mediaOn ? 'true' : 'false'}' === 'true';
+const DEFAULTS = { q:'', status:'published', listing_type:'', property_type:'', province:'', min_beds:'', min_price:'', max_price:'', sort:'newest', page:'1' };
+let S = Object.assign({}, DEFAULTS);
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const usd = n => n==null||n===''?'' : Number(n).toLocaleString('en-US',{maximumFractionDigits:0});
+// Rebuild S from scratch rather than merging, so filters absent from the URL
+// are actually cleared when navigating back or forward.
+function readUrl(){ const p=new URLSearchParams(location.search); S=Object.assign({}, DEFAULTS); for(const k in S) if(p.get(k)) S[k]=p.get(k); }
+function writeUrl(replace){ const p=new URLSearchParams(); for(const k in S) if(S[k]) p.set(k,S[k]); const u=p.toString()?'?'+p.toString():location.pathname; history[replace?'replaceState':'pushState']({},'',u); }
+function qs(){ const p=new URLSearchParams(); for(const k in S) if(S[k]) p.set(k,S[k]); return p.toString(); }
+const money = p => p.listing_type==='rent' && p.rent_price ? '$'+usd(p.rent_price)+'/mo' : p.sale_price ? '$'+usd(p.sale_price) : 'Price on request';
+const where = p => [p.street,p.village,p.sangkat,p.district,p.province].filter(Boolean).join(', ') || 'Location not specified';
+
+function card(p){
+  const img = MEDIA
+    ? (p.image_key ? '<img src="/media/'+encodeURIComponent(p.image_key)+'" alt="" loading="lazy" class="w-full h-52 object-cover">' : fallback(p))
+    : fallback(p);
+  return '<a href="/properties/'+p.id+'" class="group bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-lg hover:border-slate-300 transition flex flex-col">'
+    + '<div class="relative">'+img
+    + '<span class="absolute top-3 left-3 bg-slate-900/85 text-white text-[11px] font-semibold uppercase tracking-wide px-2.5 py-1 rounded-full">'+esc(p.listing_type==='rent'?'For Rent':'For Sale')+'</span>'
+    + (p.image_count>1?'<span class="absolute bottom-3 right-3 bg-white/90 text-slate-700 text-[11px] font-semibold px-2 py-1 rounded-full">'+p.image_count+' photos</span>':'')
+    + '</div>'
+    + '<div class="p-4 flex flex-col flex-1">'
+    + '<p class="text-xl font-bold text-slate-900">'+money(p)+'</p>'
+    + '<p class="text-sm text-slate-600 mt-1.5 flex items-center gap-1.5 flex-wrap">'
+      + '<span>'+esc(p.bedrooms??'—')+' bed</span><span class="text-slate-300">|</span>'
+      + '<span>'+esc(p.bathrooms??'—')+' bath</span><span class="text-slate-300">|</span>'
+      + '<span>'+esc(p.property_type||'Property')+'</span></p>'
+    + '<h3 class="font-semibold mt-2.5 group-hover:text-emerald-700 transition line-clamp-2">'+esc(p.title)+'</h3>'
+    + '<p class="text-xs text-slate-400 mt-1 truncate">'+esc(where(p))+'</p>'
+    + '</div></a>';
+}
+function fallback(p){
+  const t = esc((p.property_type||'Home').charAt(0).toUpperCase());
+  return '<div class="w-full h-52 bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center text-slate-400 text-4xl font-light">'+t+'</div>';
+}
+function skeleton(){ let o=''; for(let i=0;i<6;i++) o+='<div class="bg-white rounded-2xl border border-slate-200 overflow-hidden"><div class="h-52 bg-slate-100 animate-pulse"></div><div class="p-4"><div class="h-6 bg-slate-100 rounded animate-pulse w-2/3"></div><div class="h-4 bg-slate-100 rounded animate-pulse w-1/2 mt-3"></div><div class="h-4 bg-slate-100 rounded animate-pulse w-3/4 mt-2"></div></div></div>'; return o; }
+
+function activeChips(){
+  const labels={listing_type:{sale:'For sale',rent:'For rent'},property_type:{},province:{},min_beds:{},min_price:{},max_price:{}};
+  const out=[];
+  if(S.listing_type) out.push(['listing_type', labels.listing_type[S.listing_type]||S.listing_type]);
+  if(S.property_type) out.push(['property_type', S.property_type]);
+  if(S.province) out.push(['province', S.province]);
+  if(S.min_beds) out.push(['min_beds', S.min_beds+'+ beds']);
+  if(S.min_price||S.max_price){
+    const lo=S.min_price?'$'+usd(S.min_price):'Any';
+    const hi=S.max_price?'$'+usd(S.max_price):'Any';
+    out.push(['price', (S.min_price&&S.max_price)?lo+' – '+hi : S.min_price?'From '+lo : 'Up to '+hi]);
+  }
+  if(!out.length) return '';
+  return '<div class="flex flex-wrap gap-2 mb-4">'+out.map(([k,l])=>'<button data-clear="'+k+'" class="inline-flex items-center gap-1.5 bg-slate-900 text-white text-xs font-medium px-3 py-1.5 rounded-full hover:bg-slate-700">'+esc(l)+' <span aria-hidden="true">&times;</span></button>').join('')+'<button data-clear="all" class="text-xs text-slate-500 underline hover:text-slate-900 px-2">Clear all</button></div>';
+}
+
+function facetRow(label, field, facets){
+  const keys=Object.keys(facets||{}).sort();
+  if(!keys.length) return '';
+  return '<div><h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2.5">'+label+'</h3><div class="space-y-1.5">'
+    + keys.map(k=>'<label class="flex items-center gap-2.5 cursor-pointer group py-0.5"><input type="radio" name="'+field+'" data-f="'+field+'" value="'+esc(k)+'" '+(S[field]===k?'checked':'')+' class="accent-emerald-600 w-4 h-4"><span class="text-sm group-hover:text-emerald-700 flex-1 '+(S[field]===k?'font-semibold text-slate-900':'text-slate-600')+'">'+esc(k)+'</span><span class="text-xs text-slate-400 tabular-nums">'+facets[k]+'</span></label>').join('')
+    + (S[field]?'<label class="flex items-center gap-2.5 cursor-pointer pt-1"><input type="radio" name="'+field+'" data-f="'+field+'" value="" class="accent-emerald-600 w-4 h-4"><span class="text-sm text-slate-500">Any</span></label>':'')
+    + '</div></div>';
+}
+function bedRow(facets){
+  const opts=[['','Any'],[1,'1+'],[2,'2+'],[3,'3+'],[4,'4+'],[5,'5+']];
+  return '<div><h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2.5">Bedrooms</h3><div class="flex flex-wrap gap-1.5">'
+    + opts.map(([v,l])=>'<button data-f="min_beds" data-v="'+v+'" class="px-3 py-1.5 text-sm rounded-lg border '+(S.min_beds===v?'bg-slate-900 text-white border-slate-900':'border-slate-200 hover:border-slate-400')+'">'+l+'</button>').join('')
+    + '</div></div>';
+}
+
+async function load(push){
+  document.getElementById('grid').innerHTML = skeleton();
+  document.getElementById('count').textContent = 'Loading…';
+  writeUrl(push);
+  const [res, fac] = await Promise.all([
+    fetch('/api/properties?'+qs()).then(r=>r.json()),
+    fetch('/api/properties/facets?'+qs()).then(r=>r.json()),
+  ]);
+  document.getElementById('chips').innerHTML = activeChips();
+  document.getElementById('rail').innerHTML =
+      bedRow(fac.beds)
+    + '<div><h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2.5">Price (USD)</h3>'
+    + '<div class="flex items-center gap-2"><input id="minp" type="number" min="0" placeholder="Min" value="'+esc(S.min_price)+'" class="w-full p-2 text-sm border rounded-lg"><span class="text-slate-400">–</span><input id="maxp" type="number" min="0" placeholder="Max" value="'+esc(S.max_price)+'" class="w-full p-2 text-sm border rounded-lg"></div>'
+    + '<button id="applyPrice" class="mt-2 w-full text-sm border border-slate-200 rounded-lg py-2 hover:border-slate-400">Apply price</button></div>'
+    + facetRow('Property type','property_type',fac.types)
+    + facetRow('Province','province',fac.provinces);
+  document.getElementById('applyPrice').onclick = () => { S.min_price=document.getElementById('minp').value; S.max_price=document.getElementById('maxp').value; S.page='1'; load(true); };
+
+  const total = res.total||0;
+  document.getElementById('count').innerHTML = total
+    ? '<span class="font-semibold text-slate-900">'+total+' propert'+(total===1?'y':'ies')+'</span>'
+    : '<span class="text-slate-500">No matches</span>';
+  document.getElementById('grid').innerHTML = total
+    ? res.data.map(card).join('')
+    : '<div class="col-span-full py-20 text-center"><div class="text-4xl mb-3">🏠</div><p class="font-semibold">No properties match these filters</p><p class="text-slate-500 text-sm mt-1.5">Try widening the price range or clearing a filter.</p><button id="resetInline" class="mt-5 bg-slate-900 text-white px-5 py-2.5 rounded-xl text-sm">Reset filters</button></div>';
+  const reset = document.getElementById('resetInline');
+  if(reset) reset.onclick = resetAll;
+
+  let pg='';
+  if(res.pages>1){
+    const cur=res.page, last=res.pages;
+    const btn=(p,label,dis,on)=>'<button data-page="'+p+'" '+(on?'class="bg-slate-900 text-white border-slate-900"':'class="border-slate-200 hover:border-slate-400"')+' '+(dis?'opacity-40 pointer-events-none':'')+' px-3.5 py-2 text-sm rounded-lg border">'+label+'</button>';
+    const nums=[]; for(let i=Math.max(1,cur-2);i<=Math.min(last,cur+2);i++) nums.push('<button data-page="'+i+'" class="'+(i===cur?'bg-slate-900 text-white border-slate-900':'border-slate-200 hover:border-slate-400')+' px-3.5 py-2 text-sm rounded-lg border tabular-nums">'+i+'</button>');
+    pg='<div class="col-span-full flex items-center justify-center gap-1.5 pt-6">'+btn(cur-1,'Prev',cur===1,false)+nums.join('')+btn(cur+1,'Next',cur===last,false)+'</div>';
+  }
+  document.getElementById('grid').insertAdjacentHTML('beforeend', pg);
+}
+
+document.addEventListener('click', e => {
+  const f = e.target.closest('[data-f]');
+  if(f){ const k=f.dataset.f; const v=(f.dataset.v!==undefined?f.dataset.v:f.value); S[k]=(S[k]===v?'':v); S.page='1'; load(true); return; }
+  const c = e.target.closest('[data-clear]');
+  if(c){ const k=c.dataset.clear;
+    if(k==='all'){ S.property_type='';S.province='';S.min_beds='';S.min_price='';S.max_price='';S.q='';document.getElementById('q').value=''; }
+    else if(k==='price'){ S.min_price='';S.max_price=''; }
+    else S[k]='';
+    S.page='1'; load(true); return; }
+  const p = e.target.closest('[data-page]');
+  if(p){ S.page=p.dataset.page; load(true); window.scrollTo({top:0,behavior:'smooth'}); }
+});
+document.getElementById('q').addEventListener('input', e => { S.q=e.target.value; S.page='1'; clearTimeout(window.__t); window.__t=setTimeout(()=>load(true),320); });
+document.getElementById('sort').addEventListener('change', e => { S.sort=e.target.value; S.page='1'; load(true); });
+for(const b of document.querySelectorAll('[data-lt]')) b.addEventListener('click', () => { S.listing_type=b.dataset.lt; S.page='1'; load(true); });
+function resetAll(){ S.property_type='';S.province='';S.min_beds='';S.min_price='';S.max_price='';S.q='';S.listing_type='';document.getElementById('q').value='';S.page='1';load(true); }
+document.getElementById('resetTop').onclick = resetAll;
+window.addEventListener('popstate', () => { readUrl(); document.getElementById('q').value=S.q; document.getElementById('sort').value=S.sort; load(false); });
+readUrl();
+document.getElementById('q').value = S.q;
+document.getElementById('sort').value = S.sort;
+load(false);
+</script>`;
+
+app.get('/properties', c => {
+  const mediaOn = !!c.env.MEDIA;
+  return c.html(page('Properties', html`
+<main class="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+  <div class="bg-white border border-slate-200 rounded-2xl p-3 sm:p-4 flex flex-col sm:flex-row gap-3 mb-6">
+    <div class="flex rounded-xl bg-slate-100 p-1 shrink-0">
+      <button data-lt="sale" class="flex-1 sm:flex-none px-4 py-2 text-sm font-semibold rounded-lg bg-white shadow-sm">Buy</button>
+      <button data-lt="rent" class="flex-1 sm:flex-none px-4 py-2 text-sm font-semibold rounded-lg text-slate-500">Rent</button>
+    </div>
+    <div class="flex-1 relative">
+      <input id="q" placeholder="Search by title, district, sangkat or street…" class="w-full p-2.5 pl-9 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30">
+      <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    </div>
+    <select id="sort" class="p-2.5 border border-slate-200 rounded-xl text-sm bg-white">
+      <option value="newest">Newest first</option>
+      <option value="price_asc">Price: low to high</option>
+      <option value="price_desc">Price: high to low</option>
+      <option value="beds">Most bedrooms</option>
+    </select>
+  </div>
+
+  <div class="flex gap-6">
+    <aside class="hidden lg:block w-60 shrink-0">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-bold">Filters</h2>
+        <button id="resetTop" class="text-xs text-slate-500 hover:text-slate-900 underline">Reset</button>
+      </div>
+      <div id="rail" class="space-y-6"></div>
+    </aside>
+
+    <div class="flex-1 min-w-0">
+      <div id="chips"></div>
+      <div id="count" class="text-sm text-slate-500 mb-4">Loading…</div>
+      <div id="grid" class="grid sm:grid-cols-2 xl:grid-cols-3 gap-5"></div>
+    </div>
+  </div>
+</main>
+${clientScript(mediaOn)}`));
+});
 
 app.get('/properties/:id', async c => { const p=await c.env.DB.prepare('SELECT * FROM properties WHERE id=?').bind(c.req.param('id')).first(); if(!p) return c.notFound(); return c.html(page(String((p as any).title), html`<main class="max-w-5xl mx-auto px-6 py-10"><div class="h-80 bg-slate-200 rounded-3xl"></div><div class="bg-white p-8 rounded-3xl mt-5"><p class="text-emerald-600 font-semibold">${(p as any).property_type}</p><h1 class="text-4xl font-bold mt-2">${(p as any).title}</h1><p class="text-slate-500 mt-2">${(p as any).province||''} ${(p as any).district||''} ${(p as any).sangkat||''}</p><div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-8"><div><b>${(p as any).bedrooms||'-'}</b><br>Bedrooms</div><div><b>${(p as any).bathrooms||'-'}</b><br>Bathrooms</div><div><b>${(p as any).land_area||'-'}</b><br>Land m²</div><div><b>${(p as any).building_area||'-'}</b><br>Building m²</div></div><p class="mt-8 whitespace-pre-line">${(p as any).description||''}</p><button class="mt-8 bg-emerald-600 text-white px-6 py-3 rounded-xl">Contact Agent</button></div></main>`)); });
 
@@ -119,7 +292,71 @@ async function verifyTelegramJwt(token:string, clientId:string){
 app.get('/auth/telegram', async c => { const id=c.env.TELEGRAM_CLIENT_ID; if(!id||!c.env.TELEGRAM_CLIENT_SECRET) return c.html(notice('Telegram login is not available','Telegram sign-in has not been configured on this deployment yet. Use your email and password to sign in.'),503); if(!c.env.TELEGRAM_REDIRECT_URI||c.env.TELEGRAM_REDIRECT_URI.includes('YOUR-DOMAIN')) return c.html(notice('Telegram login is misconfigured','The Telegram redirect URI has not been set for this deployment. Use your email and password to sign in.'),503); const state=crypto.randomUUID(); const verifier=b64url(crypto.getRandomValues(new Uint8Array(32))); const challenge=b64url(await sha256Text(verifier)); await c.env.SESSIONS.put(`oauth:${state}`,verifier,{expirationTtl:600}); const url=new URL('https://oauth.telegram.org/auth'); url.searchParams.set('client_id',id); url.searchParams.set('redirect_uri',c.env.TELEGRAM_REDIRECT_URI); url.searchParams.set('response_type','code'); url.searchParams.set('scope','openid profile phone'); url.searchParams.set('state',state); url.searchParams.set('code_challenge',challenge); url.searchParams.set('code_challenge_method','S256'); return c.redirect(url.toString()); });
 app.get('/auth/telegram/callback', async c => { try { const code=c.req.query('code'),state=c.req.query('state'); if(!code||!state) return c.html(notice('Sign-in failed','Telegram did not return an authorization code. Please try again.'),400); const verifier=await c.env.SESSIONS.get(`oauth:${state}`); await c.env.SESSIONS.delete(`oauth:${state}`); if(!verifier) return c.html(notice('Sign-in expired','This sign-in link was already used or took too long. Please try again.'),400); const basic=btoa(`${c.env.TELEGRAM_CLIENT_ID}:${c.env.TELEGRAM_CLIENT_SECRET}`); const form=new URLSearchParams({grant_type:'authorization_code',code,redirect_uri:c.env.TELEGRAM_REDIRECT_URI,client_id:c.env.TELEGRAM_CLIENT_ID!,code_verifier:verifier}); const tr=await fetch('https://oauth.telegram.org/token',{method:'POST',headers:{Authorization:`Basic ${basic}`,'Content-Type':'application/x-www-form-urlencoded'},body:form}); const tj:any=await tr.json(); if(!tr.ok||!tj.id_token) return c.html(notice('Telegram sign-in failed','Telegram rejected the sign-in request. Please try again.'),401); const claims:any=await verifyTelegramJwt(tj.id_token,c.env.TELEGRAM_CLIENT_ID!); const role:any=await c.env.DB.prepare('SELECT id FROM roles WHERE name=?').bind('customer').first(); if(!role) return c.html(notice('Sign-in unavailable','The customer role is missing from the database. Run the migrations again.'),500); const existing:any=await c.env.DB.prepare('SELECT u.*,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE u.telegram_id=?').bind(String(claims.sub)).first(); let u:any=existing; if(!u){ if(!c.env.DB) return c.html(notice('Sign-in unavailable','Database binding is missing.'),500); const ins=await c.env.DB.prepare('INSERT INTO users(name,phone,telegram_id,telegram_username,role_id) VALUES(?,?,?,?,?)').bind(claims.name||claims.preferred_username||'Telegram User',claims.phone_number||null,String(claims.sub),claims.preferred_username||null,(role as any).id).run(); u=await c.env.DB.prepare('SELECT u.*,r.name role FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=?').bind(ins.meta.last_row_id).first(); } const sid=crypto.randomUUID(); await c.env.SESSIONS.put(`session:${sid}`,JSON.stringify(u),{expirationTtl:604800}); setCookie(c,'proptech_session',sid,{httpOnly:true,secure:true,sameSite:'Lax',path:'/',maxAge:604800}); return c.redirect('/dashboard'); } catch(e){ console.error('telegram callback error', e); return c.html(notice('Sign-in failed','We could not complete Telegram sign-in. Please try again or use your email and password.'),401); } });
 
-app.get('/api/properties', async c => { const q=c.req.query('q')||''; const status=c.req.query('status'); const type=c.req.query('property_type')||''; const limit=Math.min(Number(c.req.query('limit')||30),100); let sql='SELECT * FROM properties WHERE 1=1'; const args:any[]=[]; if(status){sql+=' AND status=?';args.push(status)} if(type){sql+=' AND property_type=?';args.push(type)} if(q){sql+=' AND (title LIKE ? OR province LIKE ? OR district LIKE ? OR sangkat LIKE ?)';const x=`%${q}%`;args.push(x,x,x,x)} sql+=' ORDER BY created_at DESC LIMIT ?';args.push(limit); const {results}=await c.env.DB.prepare(sql).bind(...args).all(); return c.json({data:results}); });
+// Builds the shared WHERE clause used by both the search endpoint and the
+// facet endpoint, so the counts in the filter rail can never disagree with
+// the results they label.
+type Facets = { types:Record<string,number>, provinces:Record<string,number>, beds:Record<string,number>, total:number };
+
+function buildWhere(q:any){
+  const where:string[] = ['1=1']; const args:any[] = [];
+  const status = q.get('status');
+  if(status){ where.push('status=?'); args.push(status); }
+  const listing = q.get('listing_type');
+  if(listing==='sale'||listing==='rent'){ where.push('listing_type=?'); args.push(listing); }
+  const type = q.get('property_type');
+  if(type){ where.push('property_type=?'); args.push(type); }
+  const province = q.get('province');
+  if(province){ where.push('province=?'); args.push(province); }
+  const minBeds = Number(q.get('min_beds'));
+  if(Number.isFinite(minBeds) && minBeds>0){ where.push('bedrooms>=?'); args.push(minBeds); }
+  const min = Number(q.get('min_price')), max = Number(q.get('max_price'));
+  if(Number.isFinite(min)&&min>0){ where.push('COALESCE(CASE WHEN listing_type=\'rent\' THEN rent_price ELSE sale_price END,0)>=?'); args.push(min); }
+  if(Number.isFinite(max)&&max>0){ where.push('COALESCE(CASE WHEN listing_type=\'rent\' THEN rent_price ELSE sale_price END,0)<=?'); args.push(max); }
+  const qy = (q.get('q')||'').trim();
+  if(qy){ where.push('(title LIKE ? OR description LIKE ? OR province LIKE ? OR district LIKE ? OR sangkat LIKE ? OR village LIKE ? OR street LIKE ?)'); const x=`%${qy}%`; for(let i=0;i<7;i++) args.push(x); }
+  return { sql: where.join(' AND '), args };
+}
+
+function tally<T extends string>(rows:any[], field:string):Record<string,number>{
+  const out:Record<string,number> = {};
+  for(const r of rows) if(r[field]!=null) out[String(r[field])]=(out[String(r[field])]||0)+1;
+  return out;
+}
+
+app.get('/api/properties/facets', async c => {
+  const { sql, args } = buildWhere(new URL(c.req.url).searchParams);
+  const base = `SELECT property_type, province, bedrooms FROM properties WHERE ${sql}`;
+  const { results } = await c.env.DB.prepare(base).bind(...args).all();
+  const beds:Record<string,number> = {};
+  for(const r of results as any[]){ const k = r.bedrooms==null?'any':String(r.bedrooms); beds[k]=(beds[k]||0)+1; }
+  const f:Facets = { total:(results as any[]).length, types:tally(results as any[],'property_type'), provinces:tally(results as any[],'province'), beds };
+  return c.json(f);
+});
+
+app.get('/api/properties', async c => {
+  const q = new URL(c.req.url).searchParams;
+  const { sql, args } = buildWhere(q);
+  const page = Math.max(1, Number(q.get('page')||1) || 1);
+  const perPage = Math.min(24, Math.max(1, Number(q.get('per_page')||12) || 12));
+  const sorts:Record<string,string> = {
+    newest: 'created_at DESC, id DESC',
+    price_asc: 'eff_price ASC, id DESC',
+    price_desc: 'eff_price DESC, id DESC',
+    beds: 'bedrooms DESC, id DESC',
+  };
+  const sort = q.get('sort')||'newest';
+  const order = sorts[sort] || sorts.newest;
+  const total = await c.env.DB.prepare(`SELECT COUNT(*) AS n FROM properties WHERE ${sql}`).bind(...args).first<{n:number}>();
+  const rows = await c.env.DB.prepare(`
+    SELECT p.*, (SELECT object_key FROM property_images i WHERE i.property_id=p.id ORDER BY i.id LIMIT 1) AS image_key,
+           (SELECT COUNT(*) FROM property_images i WHERE i.property_id=p.id) AS image_count
+    FROM properties p
+    WHERE ${sql.replace(/\b(status|property_type|province|bedrooms|listing_type|description|title|sale_price|rent_price|sangkat|village|street)\b/g,'p.$1')}
+    ORDER BY ${order.replace(/eff_price/g,'COALESCE(CASE WHEN p.listing_type=\'rent\' THEN p.rent_price ELSE p.sale_price END,0)').replace(/created_at/g,'p.created_at')}
+    LIMIT ? OFFSET ?`).bind(...args, perPage, (page-1)*perPage).all();
+  const n = total?.n ?? 0;
+  return c.json({ data: rows.results, page, per_page: perPage, total: n, pages: Math.max(1, Math.ceil(n/perPage)) });
+});
 
 app.post('/api/properties', requireAuth, async c => { if(!(await requirePermission(c,'property.create'))) return c.json({error:'Forbidden'},403); const u=c.get('user'); const p=await c.req.json(); const r=await c.env.DB.prepare(`INSERT INTO properties(title,description,listing_type,property_type,sale_price,rent_price,bedrooms,bathrooms,land_area,building_area,province,district,sangkat,village,street,landmark,latitude,longitude,agent_id,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(p.title,p.description||null,p.listing_type,p.property_type,p.sale_price||null,p.rent_price||null,p.bedrooms||null,p.bathrooms||null,p.land_area||null,p.building_area||null,p.province||null,p.district||null,p.sangkat||null,p.village||null,p.street||null,p.landmark||null,p.latitude||null,p.longitude||null,u.id,u.id).run(); await c.env.DB.prepare('INSERT INTO audit_logs(actor_id,action,entity_type,entity_id) VALUES(?,?,?,?)').bind(u.id,'create','property',r.meta.last_row_id).run(); return c.json({ok:true,id:r.meta.last_row_id}); });
 
